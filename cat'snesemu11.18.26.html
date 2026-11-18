@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cat's NES Emulator — 60 FPS</title>
+<style>
+  :root { color-scheme: dark; --bg:#101722; --panel:#1b293b; --accent:#65b7ff; --text:#edf5ff; --muted:#a8bad0; }
+  * { box-sizing:border-box }
+  body { margin:0; min-height:100vh; background:radial-gradient(ellipse at top,#203752,var(--bg) 65%); color:var(--text); font:15px system-ui,-apple-system,Segoe UI,sans-serif; display:grid; place-items:center; padding:24px }
+  main { width:min(960px,100%); }
+  header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; flex-wrap:wrap }
+  h1 { font-size:clamp(1.5rem,4vw,2.2rem); margin:0; letter-spacing:-.04em }
+  .subtitle { color:var(--muted); margin-top:5px }
+  .pill { border:1px solid #36516d; background:#17283b; color:#bfe3ff; border-radius:999px; padding:7px 12px; font-weight:700; white-space:nowrap }
+  .panel { background:color-mix(in srgb,var(--panel) 94%,transparent); border:1px solid #30445c; border-radius:18px; padding:18px; box-shadow:0 18px 60px #0007 }
+  .screen-wrap { background:#05080d; border:1px solid #40536a; border-radius:12px; padding:12px; display:grid; place-items:center }
+  canvas { width:min(100%,768px); height:auto; aspect-ratio:256/240; image-rendering:pixelated; image-rendering:crisp-edges; background:#000; display:block }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:16px }
+  button,.file-label { background:#263d57; color:var(--text); border:1px solid #45627f; border-radius:10px; padding:10px 14px; font:inherit; font-weight:650; cursor:pointer }
+  button:hover,.file-label:hover { background:#315273 }
+  button:disabled { opacity:.45; cursor:not-allowed }
+  input[type=file] { display:none }
+  .status { margin-top:14px; color:var(--muted); min-height:1.5em; overflow-wrap:anywhere }
+  .help { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:14px }
+  .help div { background:#142235; border:1px solid #2c4058; border-radius:10px; padding:11px 13px; color:var(--muted) }
+  kbd { color:#fff; background:#30465f; border:1px solid #526b87; border-radius:5px; padding:1px 5px; font: .85em ui-monospace,monospace }
+  .note { font-size:.88rem; color:var(--muted); line-height:1.5; margin:14px 2px 0 }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>🐱 Cat's NES Emulator</h1>
+      <div class="subtitle">Browser edition · NTSC-style 60 FPS target</div>
+    </div>
+    <div class="pill" id="fps">60 FPS target · No ROM loaded</div>
+  </header>
+
+  <section class="panel">
+    <div class="screen-wrap">
+      <canvas id="screen" width="256" height="240" aria-label="NES display"></canvas>
+    </div>
+    <div class="controls">
+      <label class="file-label" for="rom">Load NES ROM (.nes)</label>
+      <input id="rom" type="file" accept=".nes,application/octet-stream">
+      <button id="pause" disabled>Pause</button>
+      <button id="reset" disabled>Reset</button>
+      <button id="fullscreen">Fullscreen</button>
+      <button id="mute" disabled>Audio: muted</button>
+    </div>
+    <div class="status" id="status" role="status">Choose a legally obtained homebrew or game dump in iNES/NES 2.0 format.</div>
+    <div class="help">
+      <div><strong>Movement</strong><br><kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></div>
+      <div><strong>Buttons</strong><br><kbd>Z</kbd> A · <kbd>X</kbd> B</div>
+      <div><strong>System</strong><br><kbd>Enter</kbd> Start · <kbd>Shift</kbd> Select</div>
+      <div><strong>Performance</strong><br>Frame loop targets 60 Hz; actual speed depends on browser and device.</div>
+    </div>
+    <p class="note">Emulation engine: JSNES loaded from jsDelivr. This page does not include games, BIOS files, or copyrighted ROMs. ROMs stay in your browser session and are not uploaded by this page. This is a frontend around an existing emulator core, not an independently implemented NES CPU/PPU.</p>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/jsnes@1.2.1/dist/jsnes.min.js"></script>
+<script>
+(() => {
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  const image = ctx.createImageData(256, 240);
+  const status = document.getElementById('status');
+  const fpsBadge = document.getElementById('fps');
+  const pauseButton = document.getElementById('pause');
+  const resetButton = document.getElementById('reset');
+  const muteButton = document.getElementById('mute');
+  let nes = null, loaded = false, paused = false, muted = true;
+  let raf = 0, lastTime = 0, accumulator = 0, frames = 0, fpsTime = 0;
+
+  function setStatus(message) { status.textContent = message; }
+  function paintFrame(buffer) {
+    for (let i = 0; i < buffer.length; i++) {
+      const pixel = buffer[i] >>> 0;
+      const p = i * 4;
+      image.data[p] = pixel & 255;
+      image.data[p + 1] = (pixel >>> 8) & 255;
+      image.data[p + 2] = (pixel >>> 16) & 255;
+      image.data[p + 3] = 255;
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+  function makeNES() {
+    return new jsnes.NES({
+      onFrame: paintFrame,
+      onAudioSample: () => { /* Audio intentionally muted in this lightweight build. */ }
+    });
+  }
+  function tick(now) {
+    raf = requestAnimationFrame(tick);
+    if (!loaded || paused) { lastTime = now; return; }
+    if (!lastTime) lastTime = now;
+    accumulator += Math.min(100, now - lastTime);
+    lastTime = now;
+    const frameMs = 1000 / 60;
+    let steps = 0;
+    while (accumulator >= frameMs && steps < 4) {
+      nes.frame();
+      accumulator -= frameMs;
+      steps++;
+      frames++;
+    }
+    if (steps === 4 && accumulator >= frameMs) accumulator = 0;
+    if (now - fpsTime >= 1000) {
+      fpsBadge.textContent = `${frames} FPS · 60 FPS target`;
+      frames = 0;
+      fpsTime = now;
+    }
+  }
+  function startLoop() { if (!raf) raf = requestAnimationFrame(tick); }
+  function loadROM(file) {
+    if (!window.jsnes) {
+      setStatus('Could not load the JSNES engine. Check your internet connection and reload this page.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const bytes = new Uint8Array(reader.result);
+        if (bytes.length < 16 || bytes[0] !== 0x4e || bytes[1] !== 0x45 || bytes[2] !== 0x53 || bytes[3] !== 0x1a) {
+          throw new Error('This file does not have a valid iNES header.');
+        }
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+        }
+        nes = makeNES();
+        nes.loadROM(binary);
+        loaded = true; paused = false; accumulator = 0; lastTime = 0;
+        pauseButton.disabled = resetButton.disabled = muteButton.disabled = false;
+        pauseButton.textContent = 'Pause';
+        setStatus(`Loaded ${file.name} · ${(bytes.length / 1024).toFixed(1)} KiB · Ready to play.`);
+        fpsBadge.textContent = '60 FPS target · Running';
+        startLoop();
+      } catch (error) {
+        loaded = false;
+        setStatus(`ROM load failed: ${error.message}`);
+      }
+    };
+    reader.onerror = () => setStatus('Could not read the selected file.');
+    reader.readAsArrayBuffer(file);
+  }
+
+  document.getElementById('rom').addEventListener('change', event => {
+    const file = event.target.files && event.target.files[0];
+    if (file) loadROM(file);
+    event.target.value = '';
+  });
+  pauseButton.addEventListener('click', () => {
+    if (!loaded) return;
+    paused = !paused;
+    pauseButton.textContent = paused ? 'Resume' : 'Pause';
+    setStatus(paused ? 'Emulation paused.' : 'Emulation resumed.');
+  });
+  resetButton.addEventListener('click', () => {
+    if (!loaded) return;
+    nes.reset(); accumulator = 0; setStatus('Console reset.');
+  });
+  document.getElementById('fullscreen').addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenElement) await canvas.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch (_) { setStatus('Fullscreen is unavailable in this browser.'); }
+  });
+  muteButton.addEventListener('click', () => {
+    muted = !muted;
+    muteButton.textContent = muted ? 'Audio: muted' : 'Audio: engine callback only';
+    setStatus('This build currently keeps audio muted.');
+    muted = true;
+    muteButton.textContent = 'Audio: muted';
+  });
+
+  const Controller = window.jsnes && window.jsnes.Controller;
+  const keys = Controller ? {
+    ArrowUp: Controller.BUTTON_UP,
+    ArrowDown: Controller.BUTTON_DOWN,
+    ArrowLeft: Controller.BUTTON_LEFT,
+    ArrowRight: Controller.BUTTON_RIGHT,
+    z: Controller.BUTTON_A, Z: Controller.BUTTON_A,
+    x: Controller.BUTTON_B, X: Controller.BUTTON_B,
+    Enter: Controller.BUTTON_START,
+    Shift: Controller.BUTTON_SELECT
+  } : {};
+  window.addEventListener('keydown', event => {
+    if (keys[event.key] !== undefined && loaded) {
+      event.preventDefault();
+      nes.buttonDown(1, keys[event.key]);
+    }
+  });
+  window.addEventListener('keyup', event => {
+    if (keys[event.key] !== undefined && loaded) {
+      event.preventDefault();
+      nes.buttonUp(1, keys[event.key]);
+    }
+  });
+  window.addEventListener('blur', () => {
+    if (loaded && nes) for (const button of Object.values(keys)) if (button !== undefined) nes.buttonUp(1, button);
+  });
+
+  if (!window.jsnes) setStatus('Loading emulator engine… If it does not appear, check your internet connection.');
+  startLoop();
+})();
+</script>
+</body>
+</html>
